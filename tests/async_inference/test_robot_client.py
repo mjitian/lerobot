@@ -240,7 +240,7 @@ def test_ready_to_send_observation_with_varying_threshold(robot_client, g_thresh
 # -----------------------------------------------------------------------------
 
 
-def test_robot_client_registers_builtin_robot_types():
+def test_robot_client_registers_required_robot_types():
     """Importing robot_client must populate RobotConfig's ChoiceRegistry.
 
     This is a regression test for a bug introduced in #2425, where removing
@@ -262,6 +262,7 @@ def test_robot_client_registers_builtin_robot_types():
         "koch_follower",
         "omx_follower",
         "bi_so_follower",
+        "tiangong2pro",
     ]
     for robot_type in expected_robot_types:
         assert robot_type in known_choices, (
