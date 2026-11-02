@@ -163,6 +163,11 @@ class RobotClient:
 
             self.stub.SendPolicyInstructions(policy_setup)
 
+            # Every policy (re)initialization starts from the robot's initial pose.
+            if hasattr(self.robot, "reset"):
+                self.logger.info("Returning robot to its initial pose...")
+                self.robot.reset()
+
             self.shutdown_event.clear()
 
             return True

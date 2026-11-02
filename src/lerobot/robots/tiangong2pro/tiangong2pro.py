@@ -53,8 +53,8 @@ class Tiangong2Pro(Robot):
         return {
             **{f"observation_states_joint_angle_left.j{i}": float for i in range(7)},
             **{f"observation_states_joint_angle_right.j{i}": float for i in range(7)},
-            **{f"observation_states_ee_pose_left.e{i}": float for i in range(9)},
-            **{f"observation_states_ee_pose_right.e{i}": float for i in range(9)},
+            # **{f"observation_states_ee_pose_left.e{i}": float for i in range(9)},
+            # **{f"observation_states_ee_pose_right.e{i}": float for i in range(9)},
             "observation_states_gripper_left": float,
             "observation_states_gripper_right": float,
         }
@@ -113,9 +113,9 @@ class Tiangong2Pro(Robot):
         for i in range(7):
             obs[f"observation_states_joint_angle_left.j{i}"] = float(state["joint_angle_l"][i])
             obs[f"observation_states_joint_angle_right.j{i}"] = float(state["joint_angle_r"][i])
-        for i in range(9):
-            obs[f"observation_states_ee_pose_left.e{i}"] = float(state["ee_pose_l"][i])
-            obs[f"observation_states_ee_pose_right.e{i}"] = float(state["ee_pose_r"][i])
+        # for i in range(9):
+        #     obs[f"observation_states_ee_pose_left.e{i}"] = float(state["ee_pose_l"][i])
+        #     obs[f"observation_states_ee_pose_right.e{i}"] = float(state["ee_pose_r"][i])
         obs["observation_states_gripper_left"] = float(state["gripper_l"])
         obs["observation_states_gripper_right"] = float(state["gripper_r"])
 

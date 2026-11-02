@@ -76,11 +76,19 @@ class Tiangong2ProRobotController(Node):
     # Gripper constants
     GRIPPER_OPEN_THRESHOLD = 0.9
     GRIPPER_CLOSE_THRESHOLD = 0.1
+    GRIPPER_SMOOTHING_ALPHA = 0.3  # Lower is smoother but responds more slowly.
+    GRIPPER_BINARY_OPEN_THRESHOLD = 0.6
+    GRIPPER_BINARY_CLOSE_THRESHOLD = 0.3
     GRIPPER_ACTION_INDEX = 7
 
     # Reset constants
-    RESET_DURATION = 3.0  # s, time to interpolate back to INITIAL_JOINTS
-    RESET_PUB_PERIOD = 0.01  # s, 100 Hz stream while interpolating
+    RESET_POSE_TOLERANCE = 0.01  # m
+    RESET_ROTATION_TOLERANCE = 0.05  # rad
+    RESET_POSE_TIMEOUT = 1.0  # s
+    RESET_CARTESIAN_DURATION = 3.0  # s, minimum-jerk Cartesian trajectory
+
+    RESET_DURATION = 2.0  # s, joint-space interpolation after reaching the target pose
+    RESET_PUB_PERIOD = 0.01  # s, 100 Hz Cartesian/joint streaming and pose polling
 
     DEBUG = False
 
@@ -134,8 +142,8 @@ class Tiangong2ProRobotController(Node):
         }
         # Initialize Gripper State
         self.gripper_state = {
-            'left': {'cmd': 0.0, 'state': 0.0},
-            'right': {'cmd': 0.0, 'state': 0.0}
+            'left': {'cmd': 0.0, 'state': 0.0, 'filtered': 0.0},
+            'right': {'cmd': 0.0, 'state': 0.0, 'filtered': 0.0}
         }
 
         # Initialize Transform
@@ -293,30 +301,26 @@ class Tiangong2ProRobotController(Node):
     def step_gripper(self, action: np.ndarray, side: Literal['left', 'right']) -> None:
         gripper_position = float(action[self.GRIPPER_ACTION_INDEX])
 
-        # control_state = self.gripper_control_state[side]
-        # if not control_state['hold']:
-        #     if gripper_position > self.GRIPPER_OPEN_THRESHOLD:
-        #         control_state['trigger'] = True
-        #     elif control_state['trigger'] and gripper_position < self.GRIPPER_CLOSE_THRESHOLD:
-        #         control_state['hold'] = True
-        #         control_state['trigger'] = False
-        # else:
-        #     if gripper_position > self.GRIPPER_OPEN_THRESHOLD:
-        #         control_state['trigger'] = True
-        #     elif control_state['trigger'] and gripper_position < self.GRIPPER_CLOSE_THRESHOLD:
-        #         control_state['hold'] = False
-        #         control_state['trigger'] = False
 
-        # if control_state['hold']:
-        #     gripper_position = 1.0
-
-        self.gripper_state[side]['cmd'] = 1.0 if gripper_position > 0.4 else 0.0
-        self.gripper_state[side]['state'] = 1.0 if gripper_position > 0.4 else 0.0
+        target = float(np.clip(gripper_position, 0.0, 1.0))
+        previous = self.gripper_state[side]['filtered']
+        filtered = previous + self.GRIPPER_SMOOTHING_ALPHA * (target - previous)
+        gripper_position = self.gripper_state[side]['cmd']
+        if filtered >= self.GRIPPER_BINARY_OPEN_THRESHOLD:
+            gripper_position = 1.0
+        elif filtered <= self.GRIPPER_BINARY_CLOSE_THRESHOLD:
+            gripper_position = 0.0
+        self.gripper_state[side]['filtered'] = filtered
+        self.gripper_state[side]['cmd'] = gripper_position
+        self.gripper_state[side]['state'] = gripper_position
+        # if side == "right":
+        #     print(f'girpper_position = {gripper_position}', flush=True)
 
         publisher = self.pub_dict.get(f'{side}_gripper')
         if publisher is not None:
             msg = Float64()
-            msg.data = self.gripper_state[side]['cmd']
+            # msg.data = self.gripper_state[side]['cmd']
+            msg.data = gripper_position
             publisher.publish(msg)
 
     def step_teleop(self):
@@ -486,13 +490,11 @@ class Tiangong2ProRobotController(Node):
                     self.joint_positions[side][idx] = msg.position[msg.name.index(name)]
 
     def reset(self) -> None:
-        """Return both arms to the initial joint pose (long-press B).
+        """Return both arms to the initial pose (long-press B).
 
-        The current joint angles are interpolated towards the initial joint
-        angles over RESET_DURATION and streamed as a 14-dim [left | right]
-        absolute joint command on the forward position controller topic, which
-        tiangong2pro_hardware forwards to the vendor driver, and the saved
-        robot state is then rewritten to the initial pose.
+        A minimum-jerk Cartesian trajectory from the current TCP poses to
+        INITIAL_TCP_POSE is streamed to the MPC. Only after both arms reach the
+        target are the joints interpolated to INITIAL_JOINTS.
         """
         # Interpolating from the all-zero defaults would command a large jump.
         if not self._joint_states_received:
@@ -500,6 +502,77 @@ class Tiangong2ProRobotController(Node):
                 "[tiangong2pro_robot_controller]: no /joint_states received yet, refusing to reset."
             )
 
+        # target_poses = {
+        #     side: np.array(position + orientation, dtype=float)
+        #     for side, (position, orientation) in self.INITIAL_TCP_POSE.items()
+        # }
+        # try:
+        #     start_poses = dict(zip(('left', 'right'), self.get_arm_ee_pose(), strict=True))
+        # except Exception as e:
+        #     raise RuntimeError(
+        #         "[tiangong2pro_robot_controller]: failed to read the current TCP poses, "
+        #         "refusing to reset."
+        #     ) from e
+
+        # start_rotations = {
+        #     side: Rotation.from_quat(pose[3:]) for side, pose in start_poses.items()
+        # }
+        # rotation_deltas = {
+        #     side: (
+        #         Rotation.from_quat(target_poses[side][3:]) * start_rotations[side].inv()
+        #     ).as_rotvec()
+        #     for side in start_poses
+        # }
+        # trajectory_start = time.perf_counter()
+        # while True:
+        #     ratio = min(
+        #         (time.perf_counter() - trajectory_start) / self.RESET_CARTESIAN_DURATION,
+        #         1.0,
+        #     )
+        #     # Quintic time scaling gives zero velocity and acceleration at both ends.
+        #     blend = ratio**3 * (10.0 - 15.0 * ratio + 6.0 * ratio**2)
+        #     waypoints = {}
+        #     for side, start_pose in start_poses.items():
+        #         rotation = Rotation.from_rotvec(blend * rotation_deltas[side]) * start_rotations[side]
+        #         waypoints[side] = np.concatenate(
+        #             ((1.0 - blend) * start_pose[:3] + blend * target_poses[side][:3], rotation.as_quat())
+        #         )
+        #     self.step_policy(waypoints['left'], waypoints['right'])
+        #     if ratio >= 1.0:
+        #         break
+        #     time.sleep(self.RESET_PUB_PERIOD)
+        # print("[tiangong2pro_robot_controller]: reset Cartesian trajectory sent ...")
+
+        # deadline = time.perf_counter() + self.RESET_POSE_TIMEOUT
+        # while True:
+        #     try:
+        #         current_poses = dict(zip(('left', 'right'), self.get_arm_ee_pose(), strict=True))
+        #         position_errors = []
+        #         rotation_errors = []
+        #         for side, current_pose in current_poses.items():
+        #             target_pose = target_poses[side]
+        #             position_errors.append(np.linalg.norm(current_pose[:3] - target_pose[:3]))
+        #             rotation_error = (
+        #                 Rotation.from_quat(target_pose[3:])
+        #                 * Rotation.from_quat(current_pose[3:]).inv()
+        #             )
+        #             rotation_errors.append(np.linalg.norm(rotation_error.as_rotvec()))
+        #         if (
+        #             max(position_errors) <= self.RESET_POSE_TOLERANCE
+        #             and max(rotation_errors) <= self.RESET_ROTATION_TOLERANCE
+        #         ):
+        #             break
+        #     except Exception:
+        #         pass
+
+        #     if time.perf_counter() >= deadline:
+        #         raise RuntimeError(
+        #             "[tiangong2pro_robot_controller]: timed out waiting for the reset pose; "
+        #             "joint reset was not started."
+        #         )
+        #     time.sleep(self.RESET_PUB_PERIOD)
+
+        # print("[tiangong2pro_robot_controller]: reset pose reached, adjusting joints ...")
         start = np.array([self.joint_positions[side] for side in ('left', 'right')], dtype=float)
         target = np.array([self.INITIAL_JOINTS[side] for side in ('left', 'right')], dtype=float)
 
@@ -512,6 +585,9 @@ class Tiangong2ProRobotController(Node):
             if ratio >= 1.0:
                 break
             time.sleep(self.RESET_PUB_PERIOD)
+
+        # cmd.data = target.ravel().tolist()
+        # self.pub_dict['arm_cmd'].publish(cmd)
         print(f"[tiangong2pro_robot_controller]: initial joint command sent to "
               f"{self.ARM_CMD_TOPIC} ({len(cmd.data)} joints) ...")
 
